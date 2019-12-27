@@ -3,7 +3,7 @@
 #title           :oper_conf.py
 #description     :Updates to operational.conf with distcp blockset that would target holdem and war clusters
 #author            date                version
-#rakrishn           2019-12-10          Initial Version
+#rakrishn          2019-12-10          Initial Version
 #=======================================================================================================================
 
 import os,fileinput,re
