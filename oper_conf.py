@@ -2,7 +2,7 @@
 #!/usr/bin/env python
 #title           :oper_conf.py
 #description     :Updates to operational.conf with distcp blockset that would target holdem and war clusters
-# author            date                version
+#author            date                version
 #rakrishn           2019-12-10          Initial Version
 #=======================================================================================================================
 
