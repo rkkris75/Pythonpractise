@@ -1,0 +1,725 @@
+package org.scif.DB2Policy
+
+import org.apache.spark.SparkContext
+import org.apache.spark.SparkContext._
+import org.apache.spark.SparkConf
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.storage.StorageLevel
+import org.apache.spark.sql.SQLContext
+import org.apache.spark.sql.functions._
+import org.scif.utils.CommonUtils
+
+object DB2PolicyDataProcess {
+def main(args: Array[String]) {
+    
+//val spark = CommonUtils.getSparkSession
+val spark = SparkSession.builder.enableHiveSupport().getOrCreate()
+val sc = spark.sparkContext
+val sql = new SQLContext(sc)
+import sql.implicits._
+
+spark.conf.set("spark.sql.broadcastTimeout", 600)
+spark.conf.set("spark.sql.shuffle.partitions", 400)
+spark.conf.set("spark.sql.autoBroadCastJoinThreshold", 2040109465)
+spark.conf.set("spark.sql.crossJoin.enabled",true)
+spark.conf.set("spark.sql.tungsten.enabled", "true")
+spark.conf.set("spark.app.id", "DB2PolicyDataProcess")
+spark.conf.set("spark.io.compression.codec", "snappy")
+spark.conf.set("spark.sql.parquet.compression.codec", "snappy")
+spark.conf.set("spark.sql.parquet.mergeSchema", "true")
+//val stopwords = spark.conf.get("spark.stop.words")
+spark.sql(""" DROP TABLE IF EXISTS EDP.DB2_POLICY """)
+spark.sql("""CREATE TABLE IF NOT EXISTS edp.DB2_POLICY STORED AS PARQUET AS 
+select pol.pol_key, 
+ trade_name, 
+ if(polstat.policy_unit_num is null,'N/A',trim(aa.agent_nam)) as broker_name,
+cast(SUBSTR(duns.NOTE_TXT,11,9) as bigint) AS DUNS_NUMBER ,
+cast(regexp_replace(wcirb.NOTE_TXT,'[^0-9]+','') as bigint) as wcirb_number,
+cslb_der.cslb_num as cslb_num,
+dot.dot_num as dot_num,
+'' as broker_email,
+cont_info_dtl.cont_information as contact_info,
+owners_dtl.owners_information as officer_owners,
+note_ssn.ssn as ssn, 
+note_ssn.tax_id_ssn as tax_id_ssn,
+note_fein.fein as fein,
+note_fein.full_fein as full_fein,
+ pol.eap_amt as EAP,
+ payamt.payroll as payroll, 
+case 
+when trim(pol.quote_typ)='PAS' then 'yes' 
+else 'no' 
+end as is_pop_policy,
+trim(pol.quote_typ) as quote_typ,
+pol.gov_payr_class_cde as gov_payr_class_cde, 
+ owner_note.ownership_info,
+ stdloc.LOCATIONS as primary_address,
+ stdloc.std_address_line1 as std_address_line1,
+ stdloc.std_address_line2 as std_address_line2,
+ stdloc.std_city as std_city,
+ stdloc.std_state as std_state,
+ stdloc.std_postal as std_postal,  
+ loc_final.locations as locations,
+ loc_final.raw_addr_line1 as raw_addr_line1,
+ loc_final.raw_city as raw_city,
+ loc_final.raw_state as raw_state,
+ loc_final.raw_zip as raw_zip,
+ PAY_END.endorsements ,
+trim(pol_code.pic_manual_cancellaton_cde) as CANC_RENEWAL_CDE,
+trim(pol_code.cancel_rnwl_typ_short_dsc) as cancel_rnwl_typ_dsc, 
+ POL.EXPIRATION_DTE,
+POL.INCEPTION_DTE,
+CRW.cancellation_flg ,
+crw.canc_notice_txt,
+lic_name.name_on_lic_txt as licenses_name,
+CASE 
+WHEN POL.EXPIRATION_DTE > CURRENT_DATE AND INCEPTION_DTE <= CURRENT_DATE THEN 'ACTIVE'
+WHEN POL.EXPIRATION_DTE <= CURRENT_DATE AND CRW.cancellation_flg ='Y' THEN 'CANCELLED' 
+ELSE 'RENEWED'
+end as status,
+case when 
+length(TRIM(ER.MAILING_NAM)) = 0 and ER.MAILING_NAM is null then 
+ case when length(trim(trade_decode.trade_name_first)) = 0 and trade_decode.trade_name_first is null then legal_name_final_decode.legal_name_decode
+ else trim(trade_decode.trade_name_first)
+ end 
+else TRIM(translate(ER.MAILING_NAM,'*',' '))
+end AS MAILING_NAME,
+ legal_name_final.legal_name as legal_name,
+bus_names_arr.business_names as business_names,
+bus_names_arr_cleansed.business_names_cleansed as business_names_cleansed,
+mailadd_final.std_mailing_name as std_mailing_name,
+mailadd_final.MAILING_ADDRESS,
+mailadd_final.std_mail_address_line1 as std_mail_address_line1,
+mailadd_final.std_mail_address_line2 as std_mail_address_line2,
+mailadd_final.std_mail_city as std_mail_city,
+mailadd_final.std_mail_state as std_mail_state,
+mailadd_final.std_mail_postal as std_mail_postal,
+mailadd_final.addr_std_flg as mail_addr_std_flg,
+ER.POLICY_UNIT_NUM as mail_POLICY_UNIT_NUM,
+ER.group_idn as mail_GROUP_IDN,
+ER.MAILING_NAM as raw_mailing_name,
+ER.STREET_ADR as raw_mail_address_line1, 
+ER.CITY_ADR as raw_mail_city,
+ER.STATE_ADR as raw_mail_state,
+ER.ZIPCODE_ADR as raw_mail_postal,
+ph_dtl.ph_info as phone_number,
+'' as GRP_SEQ,
+'' as YEARS_INSURED_WITH_STATE_FUND,
+pol.update_dts
+ from (select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(POLICY.GROUP_IDN)) = 0, NULL,TRIM(POLICY.GROUP_IDN)),'000000'),6,' '),LPAD(POLICY.POLICY_UNIT_NUM,7,'0'),POLICY.POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY.POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY.POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+POLICY.* from edl_edw_policy_stg.policy where POLICY.GROUP_IDN <> '000000' and trim(policy.INPUT_ENTRY_CDE) <> 'D'and policy.inception_dte <> policy.expiration_dte AND
+(POLICY.GROUP_IDN regexp('^[0-9 ]+$') or POLICY.GROUP_IDN like 'L&%') and 
+(NOT EXISTS                              
+(SELECT 'EXISTS' FROM edl_edw_policy_stg.POLICY_EXCEPTION WHERE GROUP_IDN = policy.GROUP_IDN AND POLICY_UNIT_NUM = policy.POLICY_UNIT_NUM AND POLICY_YEAR_DTE = policy.POLICY_YEAR_DTE AND POLICY_SUFFIX_CDE = policy.POLICY_SUFFIX_CDE AND EXCEPTION_TYPE_CDE = 'B')
+OR EXISTS
+(SELECT 
+'EXISTS'
+FROM edp.policy_exception_snapshot excepsnap 
+LEFT OUTER JOIN edl_edw_policy_stg.policy_exception excep
+ON excepsnap.GROUP_IDN = excep.GROUP_IDN AND excepsnap.POLICY_UNIT_NUM = excep.POLICY_UNIT_NUM AND excepsnap.POLICY_YEAR_DTE = excep.POLICY_YEAR_DTE AND excepsnap.POLICY_SUFFIX_CDE = excep.POLICY_SUFFIX_CDE
+where excep.POLICY_UNIT_NUM is null and excepsnap.GROUP_IDN = policy.GROUP_IDN AND excepsnap.POLICY_UNIT_NUM = policy.POLICY_UNIT_NUM AND excepsnap.POLICY_YEAR_DTE = policy.POLICY_YEAR_DTE AND excepsnap.POLICY_SUFFIX_CDE = policy.POLICY_SUFFIX_CDE AND excepsnap.EXCEPTION_TYPE_CDE = 'B')
+) 
+AND 
+(NOT EXISTS 
+(SELECT 'EXISTS' FROM edl_edw_policy_stg.policy_bind_status WHERE GROUP_IDN = policy.GROUP_IDN AND POLICY_UNIT_NUM = policy.POLICY_UNIT_NUM AND POLICY_YEAR_DTE = policy.POLICY_YEAR_DTE AND POLICY_SUFFIX_CDE = policy.POLICY_SUFFIX_CDE and activity_cde <> 'D')
+OR EXISTS
+(SELECT 
+'EXISTS'
+FROM edp.policy_bind_status_snapshot snap 
+LEFT OUTER JOIN edl_edw_policy_stg.policy_bind_status bind
+ON snap.GROUP_IDN = bind.GROUP_IDN AND snap.POLICY_UNIT_NUM = bind.POLICY_UNIT_NUM AND snap.POLICY_YEAR_DTE = bind.POLICY_YEAR_DTE AND snap.POLICY_SUFFIX_CDE = bind.POLICY_SUFFIX_CDE
+where bind.POLICY_UNIT_NUM is null and snap.GROUP_IDN = policy.GROUP_IDN AND snap.POLICY_UNIT_NUM = policy.POLICY_UNIT_NUM AND snap.POLICY_YEAR_DTE = policy.POLICY_YEAR_DTE AND snap.POLICY_SUFFIX_CDE = policy.POLICY_SUFFIX_CDE and snap.activity_cde <> 'D'))
+) pol
+
+left join 
+(select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(GROUP_IDN)) = 0, NULL,TRIM(GROUP_IDN)),'000000'),6,' '),LPAD(POLICY_UNIT_NUM,7,'0'),POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+collect_list(trim(translate(trade_name_txt,'*',' '))) as trade_name
+from edl_edw_policy_stg.trade_name group by CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(GROUP_IDN)) = 0, NULL,TRIM(GROUP_IDN)),'000000'),6,' '),LPAD(POLICY_UNIT_NUM,7,'0'),POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY_SUFFIX_CDE)),'0'))) trade 
+on pol.pol_key=trade.pol_key  
+left join 
+(select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(GROUP_IDN)) = 0, NULL,TRIM(GROUP_IDN)),'000000'),6,' '),LPAD(POLICY_UNIT_NUM,7,'0'),POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+min(trim(translate(trade_name_txt,'*',' '))) as trade_name_first
+from edl_edw_policy_stg.trade_name group by CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(GROUP_IDN)) = 0, NULL,TRIM(GROUP_IDN)),'000000'),6,' '),LPAD(POLICY_UNIT_NUM,7,'0'),POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY_SUFFIX_CDE)),'0'))) trade_decode 
+on pol.pol_key=trade_decode.pol_key
+left join(select (CONCAT_WS('-',IF(GROUP_IDN='      ', '000000',LPAD(GROUP_IDN,6,'0')),LPAD(POLICY_UNIT_NUM,7,'0'),POLICY_YEAR_DTE,IF(POLICY_SUFFIX_CDE=' ','0',POLICY_SUFFIX_CDE))) AS POL_KEY ,* from edl_edw_policy_stg.policy_note where note_cde=2074 and line_num=1 and INPUT_ENTRY_CDE <> 'D')duns
+on pol.POL_KEY =duns.POL_KEY
+left join(select (CONCAT_WS('-',IF(GROUP_IDN='      ', '000000',LPAD(GROUP_IDN,6,'0')),LPAD(POLICY_UNIT_NUM,7,'0'),POLICY_YEAR_DTE,IF(POLICY_SUFFIX_CDE=' ','0',POLICY_SUFFIX_CDE))) AS POL_KEY ,* from edl_edw_policy_stg.policy_note where note_cde=2176 and line_num=1 and INPUT_ENTRY_CDE <> 'D')wcirb
+on pol.POL_KEY =wcirb.POL_KEY
+left join (SELECT PN.POL_KEY, 
+COLLECT_SET(case when trim(note_txt) rlike '^(?!1{9}|2{9}|3{9}|4{9}|5{9}|6{9}|7{9}|8{9}|9{9})[0-9]{3}(?!00)[0-9]{2}(?!0{4})[0-9]{4}$' then trim(note_txt) 
+    else NULL
+end) as ssn,
+collect_set(case when trim(note_txt) rlike '^(?!1{9}|2{9}|3{9}|4{9}|5{9}|6{9}|7{9}|8{9}|9{9})[0-9]{3}(?!00)[0-9]{2}(?!0{4})[0-9]{4}$' then substring(trim(note_txt),6,4) 
+    else NULL
+end) as tax_id_ssn
+ FROM
+(SELECT (CONCAT_WS('-',IF(GROUP_IDN='      ', '000000',LPAD(GROUP_IDN,6,'0')),LPAD(POLICY_UNIT_NUM,7,'0'),POLICY_YEAR_DTE,IF(POLICY_SUFFIX_CDE=' ','0',POLICY_SUFFIX_CDE))) AS POL_KEY , LINE_NUM,NOTE_TXT
+FROM edl_edw_policy_stg.POLICY_NOTE PN
+where PN.NOTE_CDE IN (2096) AND PN.INPUT_ENTRY_CDE <> 'D'
+ORDER BY POL_KEY ASC,CAST(LINE_NUM AS INT) ASC) PN
+GROUP BY
+PN.POL_KEY)note_ssn on pol.POL_KEY =note_ssn.POL_KEY
+left join (SELECT  PN.POL_KEY, 
+COLLECT_SET(
+if(length(cast(regexp_replace(trim(NOTE_TXT),'[^0-9]+','') as string)) = 0,NULL,
+case when length(regexp_replace(trim(NOTE_TXT),'[^0-9]+',''))=9 and substr(regexp_replace(trim(NOTE_TXT),'[^0-9]+',''),1,1)=9 and substr(regexp_replace(trim(NOTE_TXT),'[^0-9]+',''),4,1) in (7,8) 
+then cast(substr(regexp_replace(trim(NOTE_TXT),'[^0-9]+',''),-4) as string)
+else cast(regexp_replace(trim(NOTE_TXT),'[^0-9]+','') as string)
+end
+))
+ as fein,
+ COLLECT_SET(if(length(cast(regexp_replace(trim(NOTE_TXT),'[^0-9]+','') as string)) = 0,NULL,cast(regexp_replace(trim(NOTE_TXT),'[^0-9]+','') as string))) as full_fein
+ FROM
+(SELECT (CONCAT_WS('-',IF(GROUP_IDN='      ', '000000',LPAD(GROUP_IDN,6,'0')),LPAD(POLICY_UNIT_NUM,7,'0'),POLICY_YEAR_DTE,IF(POLICY_SUFFIX_CDE=' ','0',POLICY_SUFFIX_CDE))) AS POL_KEY , LINE_NUM,NOTE_TXT
+FROM edl_edw_policy_stg.POLICY_NOTE PN
+where PN.NOTE_CDE IN (2095) AND PN.INPUT_ENTRY_CDE <> 'D'
+ORDER BY POL_KEY ASC,CAST(LINE_NUM AS INT) ASC) PN
+GROUP BY
+PN.POL_KEY)note_fein on pol.POL_KEY =note_fein.POL_KEY
+left join ( 
+select a.pol_key,sum(exposure_amt) as payroll from 
+(select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(GROUP_IDN)) = 0, NULL,TRIM(GROUP_IDN)),'000000'),6,' '),LPAD(POLICY_UNIT_NUM,7,'0'),POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+exposure_amt from edl_edw_policy_stg.est_exposure where input_entry_cde<>'D')a group by a.pol_key
+)payamt on pol.pol_key=payamt.pol_key
+left join( SELECT  PN.POL_KEY, COLLECT_list(trim(NOTE_TXT)) as ownership_info FROM
+(SELECT (CONCAT_WS('-',IF(GROUP_IDN='      ', '000000',LPAD(GROUP_IDN,6,'0')),LPAD(POLICY_UNIT_NUM,7,'0'),POLICY_YEAR_DTE,IF(POLICY_SUFFIX_CDE=' ','0',POLICY_SUFFIX_CDE))) AS POL_KEY ,note_cde, LINE_NUM,NOTE_TXT
+FROM edl_edw_policy_stg.POLICY_NOTE PN
+where ((PN.NOTE_CDE IN (2091) and line_num in (2,3)) or (PN.NOTE_CDE IN (2093) and line_num in (1,2)) ) AND PN.INPUT_ENTRY_CDE <> 'D'
+ORDER BY POL_KEY ASC,PN.NOTE_CDE ASC,CAST(LINE_NUM AS INT) ASC) PN
+GROUP BY PN.POL_KEY)owner_note on  pol.pol_key=owner_note.pol_key 
+LEFT OUTER JOIN
+(
+SELECT
+ (CONCAT_WS('-',IF(PE.GROUP_IDN='      ', '000000',LPAD(PE.GROUP_IDN,6,'0')),LPAD(PE.POLICY_UNIT_NUM,7,'0'),PE.POLICY_YEAR_DTE,IF(PE.POLICY_SUFFIX_CDE=' ','0',PE.POLICY_SUFFIX_CDE))) AS POL_KEY, 
+ COLLECT_SET(trim(PE.VARIABLE_TXT)) as endorsements
+  FROM edl_edw_policy_stg.policy_endorsement PE
+   WHERE PE.INPUT_ENTRY_CDE <> 'D'
+  AND PE.endorsement_cde in (1600,1650,1651,1652,1700,1750,1751,1901,1951)
+  GROUP BY 
+(CONCAT_WS('-',IF(PE.GROUP_IDN='      ', '000000',LPAD(PE.GROUP_IDN,6,'0')),LPAD(PE.POLICY_UNIT_NUM,7,'0'),PE.POLICY_YEAR_DTE,IF(PE.POLICY_SUFFIX_CDE=' ','0',PE.POLICY_SUFFIX_CDE)))
+) PAY_END
+ON POL.POL_KEY=PAY_END.POL_KEY
+
+LEFT OUTER JOIN
+(
+select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(loc_group_idn)) = 0, NULL,TRIM(loc_group_idn)),'000000'),6,' '),LPAD(loc_policy_unit_num,7,'0'),loc_policy_year_dte,NVL(IF(LENGTH(TRIM(loc_policy_suffix_cde)) = 0, NULL,TRIM(loc_policy_suffix_cde)),'0')) AS POL_KEY,
+collect_list(if(length(trim(comb_addr)) = 0,NULL,concat_ws('|',loc_key,primary_loc_flg,latitude,longitude,comb_addr,addr_std_flg))) as LOCATIONS,
+collect_list(TRIM(address_line1)) AS std_address_line1,
+collect_list(TRIM(address_line2)) AS std_address_line2,
+collect_list(IF(TRIM(city)='',NULL,TRIM(city))) AS std_city,
+collect_list(IF(TRIM(STATE)='',NULL,TRIM(STATE))) AS std_state,
+collect_list(IF(TRIM(postal)='',NULL,TRIM(postal))) AS std_postal
+from 
+(SELECT
+loc.policy_unit_num as loc_policy_unit_num,
+loc.group_idn as loc_group_idn,
+loc.policy_suffix_cde as loc_policy_suffix_cde,
+loc.policy_year_dte as loc_policy_year_dte,
+loc.location_idn as loc_location_idn,
+loc.line_num as loc_line_num,
+case when est.policy_unit_num is not null and length(trim(est.policy_unit_num)) > 0 then 'Y'
+else 'N'
+end as primary_loc_flg,
+'' as latitude,
+'' as longitude,
+concat_ws('-',
+if(length(trim(loc.location_idn)) = 0, '999',trim(loc.location_idn)),if(length(trim(loc.line_num)) = 0, '0',trim(loc.line_num))
+) as loc_key,
+LOC.STREET45_ADR,
+LOC.CITY_ADR,
+LOC.STATE_ADR,
+LOC.ZIPCODE_ADR,
+addr_std_uniq.address_line1,
+addr_std_uniq.address_line2,
+addr_std_uniq.city,
+addr_std_uniq.state,
+addr_std_uniq.postal,
+addr_std_uniq.addr_std_flg,
+concat_ws(',',
+CASE WHEN trim(address_line1)!='' THEN concat(trim(address_line1)) ELSE NULL END, 
+    CASE WHEN trim(address_line2)!='' THEN concat(' ', trim(address_line2)) ELSE NULL END,
+    CASE WHEN trim(city)!='' THEN concat(' ', trim(city)) ELSE NULL END,
+    CASE WHEN trim(STATE)!='' THEN concat(' ', trim(STATE)) ELSE NULL END,
+    CASE WHEN trim(postal)!='' THEN concat(' ', trim(postal)) ELSE NULL END
+)as comb_addr
+FROM
+EDL_EDW_POLICY_STG.loc_of_oper_dsc loc
+left outer join EDL_EDW_POLICY_STG.pol_primary_loc EST on 
+est.policy_unit_num=loc.policy_unit_num and 
+NVL(trim(EST.group_idn),0)=NVL(trim(loc.group_idn),0) and 
+NVL(trim(EST.policy_suffix_cde),0)=NVL(trim(loc.policy_suffix_cde),0) and 
+NVL(trim(EST.policy_year_dte),0)=NVL(trim(loc.policy_year_dte),0) and 
+if(length(trim(est.location_idn)) = 0, '999',trim(est.location_idn))=if(length(trim(loc.location_idn)) = 0, '999',trim(loc.location_idn)) and 
+if(length(trim(est.line_num)) = 0, '0',trim(est.line_num))=if(length(trim(loc.line_num)) = 0, '0',trim(loc.line_num))
+inner join (
+select *, 
+row_number() over (partition by source, policy_unit_num, group_idn, policy_suffix_cde, 
+policy_year_dte, address_line1, address_line2, city, state, postal,addr_std_flg order by (select null) ) rownum
+from edp.db2policy_finalist_addresses
+) addr_std_uniq
+ON NVL(trim(addr_std_uniq.policy_unit_num),0)=NVL(trim(loc.policy_unit_num),0) and 
+NVL(trim(addr_std_uniq.group_idn),0)=NVL(trim(loc.group_idn),0) and 
+NVL(trim(addr_std_uniq.policy_suffix_cde),0)=NVL(trim(loc.policy_suffix_cde),0) and 
+NVL(trim(addr_std_uniq.policy_year_dte),0)=NVL(trim(loc.policy_year_dte),0) and 
+if(length(trim(addr_std_uniq.location_idn)) = 0, '999',trim(addr_std_uniq.location_idn))=if(length(trim(loc.location_idn)) = 0, '999',trim(loc.location_idn)) and 
+if(length(trim(addr_std_uniq.line_num)) = 0, '0',trim(addr_std_uniq.line_num))=if(length(trim(loc.line_num)) = 0, '0',trim(loc.line_num)) and addr_std_uniq.rownum = 1
+where loc.input_entry_cde <> 'D'
+) aggloc
+group by 
+CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(loc_group_idn)) = 0, NULL,TRIM(loc_group_idn)),'000000'),6,' '),LPAD(loc_policy_unit_num,7,'0'),loc_policy_year_dte,NVL(IF(LENGTH(TRIM(loc_policy_suffix_cde)) = 0, NULL,TRIM(loc_policy_suffix_cde)),'0'))
+) stdloc
+on pol.pol_key = stdloc.pol_key 
+
+LEFT OUTER JOIN
+(
+select pol.pol_key,
+COLLECT_LIST( 
+TRIM(CONCAT_WS(', ',TRIM(LOC.STREET45_ADR),TRIM(LOC.CITY_ADR),IF(LOC.STATE_ADR='  ',NULL,LOC.STATE_ADR),IF(LOC.ZIPCODE_ADR='     ',NULL,LOC.ZIPCODE_ADR)))
+) AS LOCATIONS,
+COLLECT_LIST(STREET45_ADR) as raw_addr_line1,
+collect_list(CITY_ADR) as raw_city,
+collect_list(STATE_ADR) as raw_state,
+collect_list(ZIPCODE_ADR) as raw_zip
+ from (
+ select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(POLICY.GROUP_IDN)) = 0, NULL,TRIM(POLICY.GROUP_IDN)),'000000'),6,' '),LPAD(POLICY.POLICY_UNIT_NUM,7,'0'),POLICY.POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY.POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY.POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+POLICY.* from edl_edw_policy_stg.policy where (POLICY.GROUP_IDN regexp('^[0-9 ]+$') or POLICY.GROUP_IDN like 'L&%') and  POLICY.GROUP_IDN <> '000000' and trim(policy.input_entry_cde) <> 'D'
+) pol
+join 
+(select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(GROUP_IDN)) = 0, NULL,TRIM(GROUP_IDN)),'000000'),6,' '),LPAD(POLICY_UNIT_NUM,7,'0'),POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+*  from 
+EDL_EDW_POLICY_STG.loc_of_oper_dsc oper) loc
+ on pol.pol_key=loc.pol_key
+group by pol.pol_key ) loc_final
+ON loc_final.pol_key = pol.pol_key
+ 
+left join EDL_EDW_POLICY_STG.canc_renwl_wording CRW ON POL.CANC_RENEWAL_CDE=CRW.CANC_RENEWAL_CDE
+
+left outer join edl_edw_policy_stg.db2_cancellation_codes pol_code
+ON trim(pol.canc_renewal_cde) = trim(pol_code.cancel_rnwl_typ_cde) and cancel_flg='Y' and 
+trim(cancel_rnwl_typ_cde) not in ('U') 
+
+LEFT OUTER JOIN edl_edw_policy_stg.employer ER ON ER.POLICY_UNIT_NUM = POL.POLICY_UNIT_NUM 
+AND NVL(TRIM(POL.GROUP_IDN),0)=NVL(trim(ER.group_idn),0)
+
+-- Mailing address
+LEFT OUTER JOIN 
+(
+select
+mailadd.POLICY_UNIT_NUM,
+mailadd.GROUP_IDN,
+IF(TRIM(mailadd.mailing_name)='', NULL,TRIM(mailadd.mailing_name)) as std_mailing_name,
+CONCAT_WS(',',
+    CASE WHEN trim(mailadd.address_line1)!='' THEN concat(trim(mailadd.address_line1)) ELSE NULL END,
+    CASE WHEN trim(mailadd.address_line2)!='' THEN concat(' ', trim(mailadd.address_line2)) ELSE NULL END,
+    CASE WHEN trim(mailadd.CITY)!='' THEN concat(' ', trim(mailadd.CITY)) ELSE NULL END,
+    CASE WHEN trim(mailadd.STATE)!='' THEN concat(' ', trim(mailadd.STATE)) ELSE NULL END,
+    CASE WHEN trim(mailadd.postal)!='' THEN concat(' ', trim(mailadd.postal)) ELSE NULL END
+    )  AS MAILING_ADDRESS,
+IF(TRIM(mailadd.address_line1)='', NULL,TRIM(mailadd.address_line1)) as std_mail_address_line1,
+IF(TRIM(mailadd.address_line2)='', NULL,TRIM(mailadd.address_line2)) as std_mail_address_line2,
+TRIM(mailadd.CITY) as std_mail_city,
+TRIM(mailadd.STATE) as std_mail_state,
+TRIM(mailadd.postal) as std_mail_postal,
+TRIM(mailadd.addr_std_flg) as addr_std_flg
+from EDP.db2policy_finalist_mailingaddresses mailadd 
+) mailadd_final ON trim(mailadd_final.POLICY_UNIT_NUM) = POL.POLICY_UNIT_NUM AND NVL(trim(mailadd_final.GROUP_IDN),0) = NVL(trim(POL.GROUP_IDN),0)
+
+LEFT OUTER JOIN (select pol_key, concat(array("PHONE|PHONEEXTN|PHONETYPE"),collect_set(phone_number)) as ph_info from 
+(select POL_KEY,
+if(cast(concat(substr(if(D.area_phone_num='   ',null,D.area_phone_num),1,3),substr(if(D.PHONE_NUM='       ',null,D.PHONE_NUM),1,3),substr(if(D.PHONE_NUM='       ',null,D.PHONE_NUM),4,7)) AS bigint) = 0, null,
+concat_ws('|',cast(concat(substr(if(D.area_phone_num='   ',null,D.area_phone_num),1,3),substr(if(D.PHONE_NUM='       ',null,D.PHONE_NUM),1,3),substr(if(D.PHONE_NUM='       ',null,D.PHONE_NUM),4,7)) AS bigint),exten_num,contact_type)
+) as phone_number, dummy
+ from 
+ (select POL_KEY , D.CHANNEL_TYPE_CDE,D.area_phone_num, D.PHONE_NUM ,trim(d.exten_num) as exten_num,'Work' as contact_type, '1' as dummy
+from (
+select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(POLICY.GROUP_IDN)) = 0, NULL,TRIM(POLICY.GROUP_IDN)),'000000'),6,' '),LPAD(POLICY.POLICY_UNIT_NUM,7,'0'),POLICY.POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY.POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY.POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+POLICY.* from edl_edw_policy_stg.policy where (POLICY.GROUP_IDN regexp('^[0-9 ]+$') or POLICY.GROUP_IDN like 'L&%') and  POLICY.GROUP_IDN <> '000000' and trim(policy.input_entry_cde) <> 'D' ) pol
+INNER JOIN edl_edw_policy_stg.cont_organization b on pol.POLICY_UNIT_NUM = b.POLICY_UNIT_NUM and NVL(TRIM(pol.GROUP_IDN), '000000') = NVL(TRIM(b.GROUP_IDN), '000000') and b.ORG_TYPE_CDE = '01' 
+INNER JOIN EDL_EDW_POLICY_STG.contact_person C ON b.ORGANIZATION_IDN = C.ORGANIZATION_IDN AND C.INPUT_ENTRY_CDE <> 'D'
+INNER JOIN edl_edw_policy_stg.contact_channel D on c.CONTACT_PERSON_IDN = D.CONTACT_PERSON_IDN  and D.INPUT_ENTRY_CDE <> 'D' and D.CHANNEL_TYPE_CDE in ('02')
+INNER JOIN edl_edw_policy_stg.contact_instr F on D.CONT_CHANNEL_IDN = F.CONT_CHANNEL_IDN and F.INPUT_ENTRY_CDE <> 'D'
+INNER JOIN edl_edw_policy_stg.contact_purpose pur ON pur.CONT_PURPOSE_CDE = F.CONT_PURPOSE_CDE AND pur.BUS_CATEGORY_CDE = '01' AND trim(pur.CONT_PURPOSE_DSC) in ('Primary')
+UNION ALL
+ select POL_KEY , D.CHANNEL_TYPE_CDE,D.area_phone_num, D.PHONE_NUM ,'' as exten_num,'Cell' as contact_type, '2' as dummy
+from (
+select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(POLICY.GROUP_IDN)) = 0, NULL,TRIM(POLICY.GROUP_IDN)),'000000'),6,' '),LPAD(POLICY.POLICY_UNIT_NUM,7,'0'),POLICY.POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY.POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY.POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+POLICY.* from edl_edw_policy_stg.policy where (POLICY.GROUP_IDN regexp('^[0-9 ]+$') or POLICY.GROUP_IDN like 'L&%') and  POLICY.GROUP_IDN <> '000000' and trim(policy.input_entry_cde) <> 'D' ) pol
+INNER JOIN edl_edw_policy_stg.cont_organization b on pol.POLICY_UNIT_NUM = b.POLICY_UNIT_NUM and NVL(TRIM(pol.GROUP_IDN), '000000') = NVL(TRIM(b.GROUP_IDN), '000000') and b.ORG_TYPE_CDE = '01' 
+INNER JOIN EDL_EDW_POLICY_STG.contact_person C ON b.ORGANIZATION_IDN = C.ORGANIZATION_IDN AND C.INPUT_ENTRY_CDE <> 'D'
+INNER JOIN edl_edw_policy_stg.contact_channel D on c.CONTACT_PERSON_IDN = D.CONTACT_PERSON_IDN  and D.INPUT_ENTRY_CDE <> 'D' and D.CHANNEL_TYPE_CDE in ('04')
+INNER JOIN edl_edw_policy_stg.contact_instr F on D.CONT_CHANNEL_IDN = F.CONT_CHANNEL_IDN and F.INPUT_ENTRY_CDE <> 'D'
+INNER JOIN edl_edw_policy_stg.contact_purpose pur ON pur.CONT_PURPOSE_CDE = F.CONT_PURPOSE_CDE AND pur.BUS_CATEGORY_CDE = '01' AND trim(pur.CONT_PURPOSE_DSC) in ('Primary')
+UNION ALL
+ select POL_KEY , D.CHANNEL_TYPE_CDE,D.area_phone_num, D.PHONE_NUM ,'' as exten_num,'Home' as contact_type, '2' as dummy
+from (
+select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(POLICY.GROUP_IDN)) = 0, NULL,TRIM(POLICY.GROUP_IDN)),'000000'),6,' '),LPAD(POLICY.POLICY_UNIT_NUM,7,'0'),POLICY.POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY.POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY.POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+POLICY.* from edl_edw_policy_stg.policy where (POLICY.GROUP_IDN regexp('^[0-9 ]+$') or POLICY.GROUP_IDN like 'L&%') and  POLICY.GROUP_IDN <> '000000' and trim(policy.input_entry_cde) <> 'D' ) pol
+INNER JOIN edl_edw_policy_stg.cont_organization b on pol.POLICY_UNIT_NUM = b.POLICY_UNIT_NUM and NVL(TRIM(pol.GROUP_IDN), '000000') = NVL(TRIM(b.GROUP_IDN), '000000') and b.ORG_TYPE_CDE = '01' 
+INNER JOIN EDL_EDW_POLICY_STG.contact_person C ON b.ORGANIZATION_IDN = C.ORGANIZATION_IDN AND C.INPUT_ENTRY_CDE <> 'D'
+INNER JOIN edl_edw_policy_stg.contact_channel D on c.CONTACT_PERSON_IDN = D.CONTACT_PERSON_IDN  and D.INPUT_ENTRY_CDE <> 'D' and D.CHANNEL_TYPE_CDE in ('03')
+INNER JOIN edl_edw_policy_stg.contact_instr F on D.CONT_CHANNEL_IDN = F.CONT_CHANNEL_IDN and F.INPUT_ENTRY_CDE <> 'D'
+INNER JOIN edl_edw_policy_stg.contact_purpose pur ON pur.CONT_PURPOSE_CDE = F.CONT_PURPOSE_CDE AND pur.BUS_CATEGORY_CDE = '01' AND trim(pur.CONT_PURPOSE_DSC) in ('Primary')
+UNION ALL
+ select POL_KEY , D.CHANNEL_TYPE_CDE,D.area_phone_num, D.PHONE_NUM ,'' as exten_num,'Fax' as contact_type, '3' as dummy
+from (
+select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(POLICY.GROUP_IDN)) = 0, NULL,TRIM(POLICY.GROUP_IDN)),'000000'),6,' '),LPAD(POLICY.POLICY_UNIT_NUM,7,'0'),POLICY.POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY.POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY.POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+POLICY.* from edl_edw_policy_stg.policy where (POLICY.GROUP_IDN regexp('^[0-9 ]+$') or POLICY.GROUP_IDN like 'L&%') and  POLICY.GROUP_IDN <> '000000' and trim(policy.input_entry_cde) <> 'D' ) pol
+INNER JOIN edl_edw_policy_stg.cont_organization b on pol.POLICY_UNIT_NUM = b.POLICY_UNIT_NUM and NVL(TRIM(pol.GROUP_IDN), '000000') = NVL(TRIM(b.GROUP_IDN), '000000') and b.ORG_TYPE_CDE = '01' 
+INNER JOIN EDL_EDW_POLICY_STG.contact_person C ON b.ORGANIZATION_IDN = C.ORGANIZATION_IDN AND C.INPUT_ENTRY_CDE <> 'D'
+INNER JOIN edl_edw_policy_stg.contact_channel D on c.CONTACT_PERSON_IDN = D.CONTACT_PERSON_IDN  and D.INPUT_ENTRY_CDE <> 'D' and D.CHANNEL_TYPE_CDE in ('06')
+INNER JOIN edl_edw_policy_stg.contact_instr F on D.CONT_CHANNEL_IDN = F.CONT_CHANNEL_IDN and F.INPUT_ENTRY_CDE <> 'D'
+INNER JOIN edl_edw_policy_stg.contact_purpose pur ON pur.CONT_PURPOSE_CDE = F.CONT_PURPOSE_CDE AND pur.BUS_CATEGORY_CDE = '01' AND trim(pur.CONT_PURPOSE_DSC) in ('Primary')
+UNION ALL
+select POL_KEY , D.CHANNEL_TYPE_CDE,D.area_phone_num, D.PHONE_NUM ,trim(d.exten_num) as exten_num,'Work' as contact_type, '4' as dummy
+from (
+select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(POLICY.GROUP_IDN)) = 0, NULL,TRIM(POLICY.GROUP_IDN)),'000000'),6,' '),LPAD(POLICY.POLICY_UNIT_NUM,7,'0'),POLICY.POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY.POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY.POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+POLICY.* from edl_edw_policy_stg.policy where (POLICY.GROUP_IDN regexp('^[0-9 ]+$') or POLICY.GROUP_IDN like 'L&%') and  POLICY.GROUP_IDN <> '000000' and trim(policy.input_entry_cde) <> 'D' ) pol
+INNER JOIN edl_edw_policy_stg.cont_organization b on pol.POLICY_UNIT_NUM = b.POLICY_UNIT_NUM and NVL(TRIM(pol.GROUP_IDN), '000000') = NVL(TRIM(b.GROUP_IDN), '000000') and b.ORG_TYPE_CDE = '01' 
+INNER JOIN EDL_EDW_POLICY_STG.contact_person C ON b.ORGANIZATION_IDN = C.ORGANIZATION_IDN AND C.INPUT_ENTRY_CDE <> 'D'
+INNER JOIN edl_edw_policy_stg.contact_channel D on c.CONTACT_PERSON_IDN = D.CONTACT_PERSON_IDN  and D.INPUT_ENTRY_CDE <> 'D' and D.CHANNEL_TYPE_CDE in ('02')
+INNER JOIN edl_edw_policy_stg.contact_instr F on D.CONT_CHANNEL_IDN = F.CONT_CHANNEL_IDN and F.INPUT_ENTRY_CDE <> 'D'
+INNER JOIN edl_edw_policy_stg.contact_purpose pur ON pur.CONT_PURPOSE_CDE = F.CONT_PURPOSE_CDE AND pur.BUS_CATEGORY_CDE = '01' AND trim(pur.CONT_PURPOSE_DSC) in ('Accounting','Claims','Inspection')
+UNION ALL
+select POL_KEY , D.CHANNEL_TYPE_CDE,D.area_phone_num, D.PHONE_NUM ,'' as exten_num,'Cell' as contact_type, '5' as dummy
+from (
+select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(POLICY.GROUP_IDN)) = 0, NULL,TRIM(POLICY.GROUP_IDN)),'000000'),6,' '),LPAD(POLICY.POLICY_UNIT_NUM,7,'0'),POLICY.POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY.POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY.POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+POLICY.* from edl_edw_policy_stg.policy where (POLICY.GROUP_IDN regexp('^[0-9 ]+$') or POLICY.GROUP_IDN like 'L&%') and  POLICY.GROUP_IDN <> '000000' and trim(policy.input_entry_cde) <> 'D' ) pol
+INNER JOIN edl_edw_policy_stg.cont_organization b on pol.POLICY_UNIT_NUM = b.POLICY_UNIT_NUM and NVL(TRIM(pol.GROUP_IDN), '000000') = NVL(TRIM(b.GROUP_IDN), '000000') and b.ORG_TYPE_CDE = '01' 
+INNER JOIN EDL_EDW_POLICY_STG.contact_person C ON b.ORGANIZATION_IDN = C.ORGANIZATION_IDN AND C.INPUT_ENTRY_CDE <> 'D'
+INNER JOIN edl_edw_policy_stg.contact_channel D on c.CONTACT_PERSON_IDN = D.CONTACT_PERSON_IDN  and D.INPUT_ENTRY_CDE <> 'D' and D.CHANNEL_TYPE_CDE in ('04')
+INNER JOIN edl_edw_policy_stg.contact_instr F on D.CONT_CHANNEL_IDN = F.CONT_CHANNEL_IDN and F.INPUT_ENTRY_CDE <> 'D'
+INNER JOIN edl_edw_policy_stg.contact_purpose pur ON pur.CONT_PURPOSE_CDE = F.CONT_PURPOSE_CDE AND pur.BUS_CATEGORY_CDE = '01' AND trim(pur.CONT_PURPOSE_DSC) in ('Accounting','Claims','Inspection')
+UNION ALL
+select POL_KEY , D.CHANNEL_TYPE_CDE,D.area_phone_num, D.PHONE_NUM ,'' as exten_num,'Home' as contact_type, '5' as dummy
+from (
+select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(POLICY.GROUP_IDN)) = 0, NULL,TRIM(POLICY.GROUP_IDN)),'000000'),6,' '),LPAD(POLICY.POLICY_UNIT_NUM,7,'0'),POLICY.POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY.POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY.POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+POLICY.* from edl_edw_policy_stg.policy where (POLICY.GROUP_IDN regexp('^[0-9 ]+$') or POLICY.GROUP_IDN like 'L&%') and  POLICY.GROUP_IDN <> '000000' and trim(policy.input_entry_cde) <> 'D' ) pol
+INNER JOIN edl_edw_policy_stg.cont_organization b on pol.POLICY_UNIT_NUM = b.POLICY_UNIT_NUM and NVL(TRIM(pol.GROUP_IDN), '000000') = NVL(TRIM(b.GROUP_IDN), '000000') and b.ORG_TYPE_CDE = '01' 
+INNER JOIN EDL_EDW_POLICY_STG.contact_person C ON b.ORGANIZATION_IDN = C.ORGANIZATION_IDN AND C.INPUT_ENTRY_CDE <> 'D'
+INNER JOIN edl_edw_policy_stg.contact_channel D on c.CONTACT_PERSON_IDN = D.CONTACT_PERSON_IDN  and D.INPUT_ENTRY_CDE <> 'D' and D.CHANNEL_TYPE_CDE in ('03')
+INNER JOIN edl_edw_policy_stg.contact_instr F on D.CONT_CHANNEL_IDN = F.CONT_CHANNEL_IDN and F.INPUT_ENTRY_CDE <> 'D'
+INNER JOIN edl_edw_policy_stg.contact_purpose pur ON pur.CONT_PURPOSE_CDE = F.CONT_PURPOSE_CDE AND pur.BUS_CATEGORY_CDE = '01' AND trim(pur.CONT_PURPOSE_DSC) in ('Accounting','Claims','Inspection')
+UNION ALL
+select POL_KEY , D.CHANNEL_TYPE_CDE,D.area_phone_num, D.PHONE_NUM ,'' as exten_num,'Fax' as contact_type, '6' as dummy
+from (
+select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(POLICY.GROUP_IDN)) = 0, NULL,TRIM(POLICY.GROUP_IDN)),'000000'),6,' '),LPAD(POLICY.POLICY_UNIT_NUM,7,'0'),POLICY.POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY.POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY.POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+POLICY.* from edl_edw_policy_stg.policy where (POLICY.GROUP_IDN regexp('^[0-9 ]+$') or POLICY.GROUP_IDN like 'L&%') and  POLICY.GROUP_IDN <> '000000' and trim(policy.input_entry_cde) <> 'D' ) pol
+INNER JOIN edl_edw_policy_stg.cont_organization b on pol.POLICY_UNIT_NUM = b.POLICY_UNIT_NUM and NVL(TRIM(pol.GROUP_IDN), '000000') = NVL(TRIM(b.GROUP_IDN), '000000') and b.ORG_TYPE_CDE = '01' 
+INNER JOIN EDL_EDW_POLICY_STG.contact_person C ON b.ORGANIZATION_IDN = C.ORGANIZATION_IDN AND C.INPUT_ENTRY_CDE <> 'D'
+INNER JOIN edl_edw_policy_stg.contact_channel D on c.CONTACT_PERSON_IDN = D.CONTACT_PERSON_IDN  and D.INPUT_ENTRY_CDE <> 'D' and D.CHANNEL_TYPE_CDE in ('06')
+INNER JOIN edl_edw_policy_stg.contact_instr F on D.CONT_CHANNEL_IDN = F.CONT_CHANNEL_IDN and F.INPUT_ENTRY_CDE <> 'D'
+INNER JOIN edl_edw_policy_stg.contact_purpose pur ON pur.CONT_PURPOSE_CDE = F.CONT_PURPOSE_CDE AND pur.BUS_CATEGORY_CDE = '01' AND trim(pur.CONT_PURPOSE_DSC) in ('Accounting','Claims','Inspection')
+ ) D
+order by pol_key,dummy 
+) ph
+group by pol_key
+) ph_dtl
+ON pol.pol_key = ph_dtl.pol_key
+
+left outer join (select aggyr.chopped_pol_key, 
+max(
+case when min_yr = max_yr then max_yr 
+else concat(min_yr,"-",max_yr)
+end) as YEARS_INSURED_WITH_STATE_FUND
+from  
+(select chopped_pol_key, min(year) min_yr, max(year) max_yr from
+(select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(POLICY.GROUP_IDN)) = 0, NULL,TRIM(POLICY.GROUP_IDN)),'000000'),6,''),LPAD(POLICY.POLICY_UNIT_NUM,7,'0'),NVL(IF(LENGTH(TRIM(POLICY.POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY.POLICY_SUFFIX_CDE)),'0')) AS chopped_pol_key,
+cast(year(POLICY.inception_dte) as string)as year from edl_edw_policy_stg.policy where (POLICY.GROUP_IDN regexp('^[0-9 ]+$') or POLICY.GROUP_IDN like 'L&%') and  POLICY.GROUP_IDN <> '000000' and trim(policy.input_entry_cde) <> 'D' and policy.inception_dte <> policy.expiration_dte
+) year_range
+group by chopped_pol_key
+) aggyr
+group by chopped_pol_key
+) years_insured
+on years_insured.chopped_pol_key = CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(pol.GROUP_IDN)) = 0, NULL,TRIM(pol.GROUP_IDN)),'000000'),6,''),LPAD(pol.POLICY_UNIT_NUM,7,'0'),NVL(IF(LENGTH(TRIM(pol.POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(pol.POLICY_SUFFIX_CDE)),'0'))
+
+LEFT OUTER JOIN (
+SELECT
+EL.POLICY_UNIT_NUM,
+EL.GROUP_IDN,
+collect_set(cast(trim(EL.LICENSE_NUMBER_TXT) as bigint)) as cslb_num
+FROM edl_edw_policy_stg.ER_LICENSE EL
+INNER JOIN edl_edw_policy_stg.LICENSE_ISSUER LI ON EL.LIC_ISSUER_IDN=LI.LIC_ISSUER_IDN and trim(EL.input_entry_cde) <> 'D' AND LI.LIC_ISSUER_IDN=1
+group by EL.POLICY_UNIT_NUM,EL.GROUP_IDN) cslb_der
+ON cslb_der.POLICY_UNIT_NUM = pol.POLICY_UNIT_NUM and nvl(trim(cslb_der.GROUP_IDN),0)= nvl(trim(pol.GROUP_IDN),0)
+
+LEFT OUTER JOIN (
+SELECT
+EL.POLICY_UNIT_NUM,
+EL.GROUP_IDN,
+collect_set(trim(regexp_replace(EL.LICENSE_NUMBER_TXT,'\u0000',''))) as dot_num
+FROM edl_edw_policy_stg.ER_LICENSE EL
+where trim(EL.input_entry_cde) <> 'D' AND (lic_type_idn = 20 or lic_issuer_idn = 4)
+group by EL.POLICY_UNIT_NUM,EL.GROUP_IDN) dot
+ON dot.POLICY_UNIT_NUM = pol.POLICY_UNIT_NUM and nvl(trim(dot.GROUP_IDN),0)= nvl(trim(pol.GROUP_IDN),0)
+
+LEFT OUTER JOIN (
+select POLICY_UNIT_NUM,group_idn,collect_set(trim(regexp_replace(name_on_lic_txt,'\u0000|\\*',''))) as name_on_lic_txt
+from edl_edw_policy_stg.er_license lic
+inner join edl_edw_policy_stg.license_type lt
+on trim(lic.lic_type_idn) = trim(lt.lic_type_idn) and trim(lic.input_entry_cde) <> 'D'
+and length(trim(translate(name_on_lic_txt,'\u0000',''))) > 0
+group by POLICY_UNIT_NUM,group_idn
+) lic_name
+on lic_name.POLICY_UNIT_NUM = pol.POLICY_UNIT_NUM and 
+NVL(TRIM(POL.GROUP_IDN),0)=NVL(trim(lic_name.group_idn),0)
+
+LEFT OUTER JOIN (
+select POLICY_UNIT_NUM,group_idn,min(trim(regexp_replace(name_on_lic_txt,'\u0000|\\*',''))) as name_on_lic_txt_first
+from edl_edw_policy_stg.er_license lic
+inner join edl_edw_policy_stg.license_type lt
+on trim(lic.lic_type_idn) = trim(lt.lic_type_idn) and trim(lic.input_entry_cde) <> 'D'
+and length(trim(translate(name_on_lic_txt,'\u0000',''))) > 0
+group by POLICY_UNIT_NUM,group_idn
+) lic_name_first
+on lic_name_first.POLICY_UNIT_NUM = pol.POLICY_UNIT_NUM and 
+NVL(TRIM(POL.GROUP_IDN),0)=NVL(trim(lic_name_first.group_idn),0)
+
+left join( SELECT  leg_nam.POL_KEY, COLLECT_list(trim(translate(legal_name_txt,'*',' '))) as legal_name FROM
+(SELECT (CONCAT_WS('-',IF(GROUP_IDN='      ', '000000',LPAD(GROUP_IDN,6,'0')),LPAD(POLICY_UNIT_NUM,7,'0'),POLICY_YEAR_DTE,IF(POLICY_SUFFIX_CDE=' ','0',POLICY_SUFFIX_CDE))) AS POL_KEY,legal_name_txt
+FROM edl_edw_policy_stg.legal_name PN where TRIM(INPUT_ENTRY_CDE) <> 'D' and  regexp_replace(legal_name_txt, "[^0-9a-zA-Z]+", "") not in ('AND')) leg_nam
+GROUP BY leg_nam.POL_KEY) legal_name_final on  pol.pol_key=legal_name_final.pol_key 
+
+left join( SELECT  leg_nam.POL_KEY, min(trim(translate(legal_name_txt,'*',' '))) as legal_name_decode FROM
+(SELECT (CONCAT_WS('-',IF(GROUP_IDN='      ', '000000',LPAD(GROUP_IDN,6,'0')),LPAD(POLICY_UNIT_NUM,7,'0'),POLICY_YEAR_DTE,IF(POLICY_SUFFIX_CDE=' ','0',POLICY_SUFFIX_CDE))) AS POL_KEY,legal_name_txt
+FROM edl_edw_policy_stg.legal_name PN where TRIM(INPUT_ENTRY_CDE) <> 'D' and  regexp_replace(legal_name_txt, "[^0-9a-zA-Z]+", "") not in ('AND') ) leg_nam
+GROUP BY leg_nam.POL_KEY) legal_name_final_decode on  pol.pol_key=legal_name_final_decode.pol_key
+
+left outer join edl_edw_policy_stg.iq_pol_brk_status polstat on 
+NVL(TRIM(POL.GROUP_IDN),0)=NVL(trim(polstat.group_idn),0)
+and pol.policy_unit_num = polstat.policy_unit_num
+and NVL(trim(pol.policy_year_dte),0) = NVL(trim(polstat.policy_year_dte),0)
+and NVL(trim(pol.policy_suffix_cde),0) = NVL(trim(polstat.policy_suffix_cde),0)
+
+--Non-clenased business name
+LEFT OUTER JOIN (select pol_key,collect_set(cast(array_element as string)) business_names 
+       from( select pol_key, explode(string_array) array_element         
+               from (select pol_key, business_names as string_array from 
+   (
+select pol.pol_key,
+split(concat_ws('|',upper(TRIM(translate(ER.MAILING_NAM,'*',' '))),upper(trim(trade_name_buss)),upper(trim(legal_name_decode)),upper(trim(name_on_lic_txt_first))),'\\|')
+ as business_names
+ from (select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(POLICY.GROUP_IDN)) = 0, NULL,TRIM(POLICY.GROUP_IDN)),'000000'),6,' '),LPAD(POLICY.POLICY_UNIT_NUM,7,'0'),POLICY.POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY.POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY.POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+POLICY.* from edl_edw_policy_stg.policy where (POLICY.GROUP_IDN regexp('^[0-9 ]+$') or POLICY.GROUP_IDN like 'L&%') and  POLICY.GROUP_IDN <> '000000' and trim(policy.input_entry_cde) <> 'D' and  policy.inception_dte <> policy.expiration_dte AND
+NOT EXISTS                              
+(SELECT 'EXISTS' FROM edl_edw_policy_stg.POLICY_EXCEPTION WHERE GROUP_IDN = policy.GROUP_IDN AND POLICY_UNIT_NUM = policy.POLICY_UNIT_NUM AND POLICY_YEAR_DTE = policy.POLICY_YEAR_DTE AND POLICY_SUFFIX_CDE = policy.POLICY_SUFFIX_CDE AND EXCEPTION_TYPE_CDE = 'B') 
+AND NOT EXISTS 
+(SELECT 'EXISTS' FROM edl_edw_policy_stg.POLICY_BIND_STATUS WHERE GROUP_IDN = policy.GROUP_IDN AND POLICY_UNIT_NUM = policy.POLICY_UNIT_NUM AND POLICY_YEAR_DTE = policy.POLICY_YEAR_DTE AND POLICY_SUFFIX_CDE = policy.POLICY_SUFFIX_CDE and activity_cde <> 'D')) pol
+
+LEFT OUTER JOIN edl_edw_policy_stg.employer ER ON ER.POLICY_UNIT_NUM = POL.POLICY_UNIT_NUM 
+AND NVL(TRIM(POL.GROUP_IDN),0)=NVL(trim(ER.group_idn),0)
+
+left join 
+(select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(GROUP_IDN)) = 0, NULL,TRIM(GROUP_IDN)),'000000'),6,' '),LPAD(POLICY_UNIT_NUM,7,'0'),POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+trim(translate(trade_name_txt,'*',' ')) as trade_name_buss
+from edl_edw_policy_stg.trade_name where TRIM(INPUT_ENTRY_CDE) <> 'D'  and  regexp_replace(trade_name_txt, "[^0-9a-zA-Z]+", "") not in ('AND')
+) trade_decode 
+on pol.pol_key=trade_decode.pol_key
+
+left join( SELECT  leg_nam.POL_KEY, trim(translate(legal_name_txt,'*',' ')) as legal_name_decode FROM
+(SELECT (CONCAT_WS('-',IF(GROUP_IDN='      ', '000000',LPAD(GROUP_IDN,6,'0')),LPAD(POLICY_UNIT_NUM,7,'0'),POLICY_YEAR_DTE,IF(POLICY_SUFFIX_CDE=' ','0',POLICY_SUFFIX_CDE))) AS POL_KEY,legal_name_txt
+FROM edl_edw_policy_stg.legal_name PN where TRIM(INPUT_ENTRY_CDE) <> 'D' and  regexp_replace(legal_name_txt, "[^0-9a-zA-Z]+", "") not in ('AND')) leg_nam
+) legal_name_final_decode on  pol.pol_key=legal_name_final_decode.pol_key
+
+LEFT OUTER JOIN (
+select POLICY_UNIT_NUM,group_idn,trim(regexp_replace(name_on_lic_txt,'\u0000|\\*','')) as name_on_lic_txt_first
+from edl_edw_policy_stg.er_license lic
+inner join edl_edw_policy_stg.license_type lt
+on trim(lic.lic_type_idn) = trim(lt.lic_type_idn) and trim(lic.input_entry_cde) <> 'D'  and  regexp_replace(name_on_lic_txt, "[^0-9a-zA-Z]+", "") not in ('AND')
+and length(trim(regexp_replace(name_on_lic_txt,'\u0000|\\*',''))) > 0
+) lic_name_first
+on lic_name_first.POLICY_UNIT_NUM = pol.POLICY_UNIT_NUM and 
+NVL(TRIM(POL.GROUP_IDN),0)=NVL(trim(lic_name_first.group_idn),0)
+) final_merge_names
+) ss 
+) agg_bus_name 
+group by pol_key 
+) bus_names_arr ON pol.pol_key = bus_names_arr.pol_key
+
+--Cleansed business names
+LEFT OUTER JOIN (select pol_key,collect_set(cast(cleansed_array_elem as string)) business_names_cleansed
+       from( select pol_key,explode(cleansed_array) cleansed_array_elem         
+               from (select pol_key,clenased_business_names as cleansed_array from 
+   (
+select pol.pol_key,
+split(concat_ws('|',edp.getcleansedbusinessname(upper(TRIM(translate(ER.MAILING_NAM,'*',' ')))),edp.getcleansedbusinessname(upper(trim(trade_name_buss))),edp.getcleansedbusinessname(upper(trim(legal_name_decode))),edp.getcleansedbusinessname(upper(trim(name_on_lic_txt_first)))),'\\|')
+ as clenased_business_names 
+ from (select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(POLICY.GROUP_IDN)) = 0, NULL,TRIM(POLICY.GROUP_IDN)),'000000'),6,' '),LPAD(POLICY.POLICY_UNIT_NUM,7,'0'),POLICY.POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY.POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY.POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+POLICY.* from edl_edw_policy_stg.policy where (POLICY.GROUP_IDN regexp('^[0-9 ]+$') or POLICY.GROUP_IDN like 'L&%') and  POLICY.GROUP_IDN <> '000000' and trim(policy.input_entry_cde) <> 'D' and  policy.inception_dte <> policy.expiration_dte AND
+NOT EXISTS                              
+(SELECT 'EXISTS' FROM edl_edw_policy_stg.POLICY_EXCEPTION WHERE GROUP_IDN = policy.GROUP_IDN AND POLICY_UNIT_NUM = policy.POLICY_UNIT_NUM AND POLICY_YEAR_DTE = policy.POLICY_YEAR_DTE AND POLICY_SUFFIX_CDE = policy.POLICY_SUFFIX_CDE AND EXCEPTION_TYPE_CDE = 'B') 
+AND NOT EXISTS 
+(SELECT 'EXISTS' FROM edl_edw_policy_stg.POLICY_BIND_STATUS WHERE GROUP_IDN = policy.GROUP_IDN AND POLICY_UNIT_NUM = policy.POLICY_UNIT_NUM AND POLICY_YEAR_DTE = policy.POLICY_YEAR_DTE AND POLICY_SUFFIX_CDE = policy.POLICY_SUFFIX_CDE and activity_cde <> 'D')) pol
+
+LEFT OUTER JOIN edl_edw_policy_stg.employer ER ON ER.POLICY_UNIT_NUM = POL.POLICY_UNIT_NUM 
+AND NVL(TRIM(POL.GROUP_IDN),0)=NVL(trim(ER.group_idn),0)
+
+left join 
+(select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(GROUP_IDN)) = 0, NULL,TRIM(GROUP_IDN)),'000000'),6,' '),LPAD(POLICY_UNIT_NUM,7,'0'),POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+trim(translate(trade_name_txt,'*',' ')) as trade_name_buss
+from edl_edw_policy_stg.trade_name where TRIM(INPUT_ENTRY_CDE) <> 'D'  and  regexp_replace(trade_name_txt, "[^0-9a-zA-Z]+", "") not in ('AND')
+) trade_decode 
+on pol.pol_key=trade_decode.pol_key
+
+left join( SELECT  leg_nam.POL_KEY, trim(translate(legal_name_txt,'*',' ')) as legal_name_decode FROM
+(SELECT (CONCAT_WS('-',IF(GROUP_IDN='      ', '000000',LPAD(GROUP_IDN,6,'0')),LPAD(POLICY_UNIT_NUM,7,'0'),POLICY_YEAR_DTE,IF(POLICY_SUFFIX_CDE=' ','0',POLICY_SUFFIX_CDE))) AS POL_KEY,legal_name_txt
+FROM edl_edw_policy_stg.legal_name PN where TRIM(INPUT_ENTRY_CDE) <> 'D' and  regexp_replace(legal_name_txt, "[^0-9a-zA-Z]+", "") not in ('AND')) leg_nam
+) legal_name_final_decode on  pol.pol_key=legal_name_final_decode.pol_key
+
+LEFT OUTER JOIN (
+select POLICY_UNIT_NUM,group_idn,trim(regexp_replace(name_on_lic_txt,'\u0000|\\*','')) as name_on_lic_txt_first
+from edl_edw_policy_stg.er_license lic
+inner join edl_edw_policy_stg.license_type lt
+on trim(lic.lic_type_idn) = trim(lt.lic_type_idn) and trim(lic.input_entry_cde) <> 'D'  and  regexp_replace(name_on_lic_txt, "[^0-9a-zA-Z]+", "") not in ('AND')
+and length(trim(regexp_replace(name_on_lic_txt,'\u0000|\\*',''))) > 0
+) lic_name_first
+on lic_name_first.POLICY_UNIT_NUM = pol.POLICY_UNIT_NUM and 
+NVL(TRIM(POL.GROUP_IDN),0)=NVL(trim(lic_name_first.group_idn),0)
+) final_merge_names1
+) ss1 
+) agg_bus_name1 
+group by pol_key
+) bus_names_arr_cleansed
+ON pol.pol_key = bus_names_arr_cleansed.pol_key   
+
+left outer join 
+(select owners_all.pol_key,
+if(size(own_info)=0,null,concat(array("NAME|TITLE"),own_info)) as owners_information from 
+(select owner_group.pol_key,
+collect_set(if(trim(owners_info) <> '',trim(owners_info),null)) as own_info from 
+(SELECT  PN.POL_KEY,
+case 
+when PN.NOTE_CDE IN (2093) then
+concat_ws('|',
+trim(reverse(
+ substring( 
+ substring(reverse(trim(NOTE_TXT)),
+instr(reverse(trim(NOTE_TXT)), ' ')+1 ),
+  instr(substring(reverse(trim(NOTE_TXT)),
+instr(reverse(trim(NOTE_TXT)), ' ')+1 ),' ')+1
+)
+)),
+description
+)
+when (PN.NOTE_CDE IN (2091) and line_num in (2,3)) then 
+concat_ws('|',concat(trim(split(trim(split("NOTE_TXT",',')[1]), 'MGR-MEMBR|MGR-MEM|MEMBER')[0]),' ',trim(split("NOTE_TXT",',')[0])),
+trim(split(trim(split("NOTE_TXT",',')[1]), ' ')[1])
+)
+when (PN.NOTE_CDE IN (2091) and line_num in (1)) then
+concat_ws('|',trim(NOTE_TXT),'')
+when PN.NOTE_CDE IN (2090) then concat_ws('|',trim(split(regexp_replace(NOTE_TXT,'\\)',''),'\/|,|-|\\(')[0]),trim(split(regexp_replace(NOTE_TXT,'\\)',''),'\/|,|-|\\(')[1]))
+when PN.NOTE_CDE IN (2094) then 
+concat_ws('|',trim(split(regexp_replace(NOTE_TXT,'\\)',''),'\/|,|-|\\(')[0]),
+trim(split(regexp_replace(NOTE_TXT,'\\)',''),'\/|-|\\(')[1]) 
+)
+end as owners_info
+FROM
+(
+select POL_KEY,note_cde,LINE_NUM,NOTE_TXT,title_lkp.description from 
+(
+SELECT (CONCAT_WS('-',IF(GROUP_IDN='      ', '000000',LPAD(GROUP_IDN,6,'0')),LPAD(POLICY_UNIT_NUM,7,'0'),POLICY_YEAR_DTE,IF(POLICY_SUFFIX_CDE=' ','0',POLICY_SUFFIX_CDE))) AS POL_KEY ,note_cde, LINE_NUM,NOTE_TXT,
+regexp_replace(
+trim(reverse(substring( 
+ substring(reverse(trim(NOTE_TXT)),
+instr(reverse(trim(NOTE_TXT)), ' ')+1 ),1,
+  instr(substring(reverse(trim(NOTE_TXT)),
+instr(reverse(trim(NOTE_TXT)), ' ')+1 ),' ')-1
+))),"[^0-9a-zA-Z]+", " " 
+) as title_key
+FROM edl_edw_policy_stg.POLICY_NOTE PN
+where ((PN.NOTE_CDE IN (2091) and line_num in (1,2,3)) or (PN.NOTE_CDE IN (2093) and line_num in (1,2)) or PN.NOTE_CDE IN (2090) or 
+(PN.NOTE_CDE IN (2094) and pmod(cast(line_num as int),2)=1 )) 
+AND PN.INPUT_ENTRY_CDE <> 'D'
+ORDER BY POL_KEY ASC,PN.NOTE_CDE ASC,CAST(LINE_NUM AS INT) ASC
+) all_data
+left outer join edl_edw_policy_stg.officer_owners_lookup title_lkp
+on all_data.title_key=title_lkp.title
+) PN
+) owner_group
+group by owner_group.pol_key
+) owners_all
+) owners_dtl
+ON pol.pol_key = owners_dtl.pol_key
+
+LEFT OUTER JOIN (select 
+cont_outer.policy_unit_num,cont_outer.group_idn,
+concat(array("CONTACTNAME|CONTACTTYPE|OFFICEPHONE|OFFICEPHONEEXTN|MOBILEPHONE|HOMEPHONE|FAX|EMAIL"),collect_list(cont_information)) as cont_information
+from (
+select contact_info.policy_unit_num,contact_info.group_idn,ContactOrder,
+first(concat_ws('|',if(trim(ContactName)='','',initcap(cast(ContactName as string))),if(trim(ContactType)='','',cast(ContactType as string)),if(size(officephone)=0,'',cast(officephone as string)),if(size(OfficePhoneExtn)=0,'',cast(OfficePhoneExtn as string)),if(size(MobilePhone)=0,'',cast(MobilePhone as string)),if(size(HomePhone)=0,'',cast(HomePhone as string)),if(size(Fax)=0,'',cast(Fax as string)),if(size(Email)=0,'',cast(Email as string))))
+ as cont_information
+from 
+(select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(POLICY.GROUP_IDN)) = 0, NULL,TRIM(POLICY.GROUP_IDN)),'000000'),6,' '),LPAD(POLICY.POLICY_UNIT_NUM,7,'0'),POLICY.POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY.POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY.POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+POLICY.* from edl_edw_policy_stg.policy where (POLICY.GROUP_IDN regexp('^[0-9 ]+$') or POLICY.GROUP_IDN like 'L&%') and  POLICY.GROUP_IDN <> '000000' and trim(policy.input_entry_cde) <> 'D' ) pol
+inner join (
+select policy_unit_num,group_idn,
+concat(trim(first_nam),
+if(trim(middle_nam)= '','',concat(' ',trim(middle_nam))),
+if(trim(last_nam)= '','',concat(' ',trim(last_nam))) 
+) as ContactName,
+trim(CONT_PURPOSE_DSC) as ContactType, 
+case 
+when trim(CONT_PURPOSE_DSC) = 'Primary' then '01'
+when trim(CONT_PURPOSE_DSC) = 'Accounting' then '02'
+when trim(CONT_PURPOSE_DSC) = 'Inspection' then '03'
+when trim(CONT_PURPOSE_DSC) = 'Claims' then '04'
+end as ContactOrder,
+collect_set(case when trim(channel_type_cde) = '02' then 
+if(length(concat(substr(if(area_phone_num='   ',null,area_phone_num),1,3),substr(if(PHONE_NUM='       ',null,PHONE_NUM),1,3),substr(if(PHONE_NUM='       ',null,PHONE_NUM),4,7))) = 0, null,
+concat(substr(if(area_phone_num='   ',null,area_phone_num),1,3),substr(if(PHONE_NUM='       ',null,PHONE_NUM),1,3),substr(if(PHONE_NUM='       ',null,PHONE_NUM),4,7))
+) 
+else null end) as officephone,
+collect_set(case when trim(channel_type_cde) = '02' then if(trim(exten_num) <> '',trim(exten_num),null) else null end) as OfficePhoneExtn,
+collect_set(case when trim(channel_type_cde) = '04' then 
+if(length(concat(substr(if(area_phone_num='   ',null,area_phone_num),1,3),substr(if(PHONE_NUM='       ',null,PHONE_NUM),1,3),substr(if(PHONE_NUM='       ',null,PHONE_NUM),4,7))) = 0, null,
+concat(substr(if(area_phone_num='   ',null,area_phone_num),1,3),substr(if(PHONE_NUM='       ',null,PHONE_NUM),1,3),substr(if(PHONE_NUM='       ',null,PHONE_NUM),4,7))
+) 
+else null end) as MobilePhone,
+collect_set(case when trim(channel_type_cde) = '03' then 
+if(length(concat(substr(if(area_phone_num='   ',null,area_phone_num),1,3),substr(if(PHONE_NUM='       ',null,PHONE_NUM),1,3),substr(if(PHONE_NUM='       ',null,PHONE_NUM),4,7))) = 0, null,
+concat(substr(if(area_phone_num='   ',null,area_phone_num),1,3),substr(if(PHONE_NUM='       ',null,PHONE_NUM),1,3),substr(if(PHONE_NUM='       ',null,PHONE_NUM),4,7))
+) 
+else null end) as HomePhone,
+collect_set(case when trim(channel_type_cde) = '06' then 
+if(length(concat(substr(if(area_phone_num='   ',null,area_phone_num),1,3),substr(if(PHONE_NUM='       ',null,PHONE_NUM),1,3),substr(if(PHONE_NUM='       ',null,PHONE_NUM),4,7))) = 0, null,
+concat(substr(if(area_phone_num='   ',null,area_phone_num),1,3),substr(if(PHONE_NUM='       ',null,PHONE_NUM),1,3),substr(if(PHONE_NUM='       ',null,PHONE_NUM),4,7))
+) 
+else null end) as Fax,
+collect_set(case when trim(channel_type_cde) = '01' then if(trim(email_adr) <> '',trim(email_adr),null) else null end) as Email
+from (
+select distinct  
+b.POLICY_UNIT_NUM,b.GROUP_IDN,d.CHANNEL_TYPE_CDE,pur.CONT_PURPOSE_DSC,d.email_adr, d.area_phone_num, D.Phone_num,exten_num,
+c.first_nam,c.middle_nam,c.last_nam
+from
+(select CONCAT_WS('-',RPAD(NVL(IF(LENGTH(TRIM(POLICY.GROUP_IDN)) = 0, NULL,TRIM(POLICY.GROUP_IDN)),'000000'),6,' '),LPAD(POLICY.POLICY_UNIT_NUM,7,'0'),POLICY.POLICY_YEAR_DTE,NVL(IF(LENGTH(TRIM(POLICY.POLICY_SUFFIX_CDE)) = 0, NULL,TRIM(POLICY.POLICY_SUFFIX_CDE)),'0')) AS POL_KEY,
+POLICY.* from edl_edw_policy_stg.policy where (POLICY.GROUP_IDN regexp('^[0-9 ]+$') or POLICY.GROUP_IDN like 'L&%') and  POLICY.GROUP_IDN <> '000000' and trim(policy.input_entry_cde) <> 'D' ) pol
+INNER JOIN edl_edw_policy_stg.cont_organization b on pol.POLICY_UNIT_NUM = b.POLICY_UNIT_NUM and NVL(TRIM(pol.GROUP_IDN), '000000') = NVL(TRIM(b.GROUP_IDN), '000000') and b.ORG_TYPE_CDE = '01' 
+INNER JOIN EDL_EDW_POLICY_STG.contact_person C ON b.ORGANIZATION_IDN = C.ORGANIZATION_IDN AND C.INPUT_ENTRY_CDE <> 'D'
+INNER JOIN edl_edw_policy_stg.contact_channel D on c.CONTACT_PERSON_IDN = D.CONTACT_PERSON_IDN  and D.INPUT_ENTRY_CDE <> 'D' and D.CHANNEL_TYPE_CDE in ('01','02','03','04','06')
+INNER JOIN edl_edw_policy_stg.contact_instr F on D.CONT_CHANNEL_IDN = F.CONT_CHANNEL_IDN and F.INPUT_ENTRY_CDE <> 'D'
+INNER JOIN edl_edw_policy_stg.contact_purpose pur ON pur.CONT_PURPOSE_CDE = F.CONT_PURPOSE_CDE AND pur.BUS_CATEGORY_CDE = '01' AND trim(pur.CONT_PURPOSE_DSC) in ('Primary','Accounting','Claims','Inspection')
+order by b.POLICY_UNIT_NUM,b.GROUP_IDN, D.CHANNEL_TYPE_CDE ASC, CONT_PURPOSE_DSC DESC
+) cont_info
+group by policy_unit_num,group_idn,concat(trim(first_nam),
+if(trim(middle_nam)= '','',concat(' ',trim(middle_nam))),
+if(trim(last_nam)= '','',concat(' ',trim(last_nam)))),trim(CONT_PURPOSE_DSC)
+order by ContactOrder
+) contact_info
+ON pol.POLICY_UNIT_NUM = contact_info.POLICY_UNIT_NUM and NVL(TRIM(pol.GROUP_IDN), '000000') = NVL(TRIM(contact_info.GROUP_IDN), '000000')
+group by contact_info.policy_unit_num,contact_info.group_idn,ContactOrder
+order by contact_info.policy_unit_num,contact_info.group_idn,ContactOrder
+) cont_outer
+group by cont_outer.policy_unit_num,cont_outer.group_idn
+) cont_info_dtl
+ON cont_info_dtl.POLICY_UNIT_NUM = POL.POLICY_UNIT_NUM AND NVL(TRIM(POL.GROUP_IDN),0)=NVL(trim(cont_info_dtl.group_idn),0) 
+
+LEFT OUTER JOIN EDL_EDW_POLICY_STG.policy_agent pa on 
+NVL(TRIM(POL.GROUP_IDN),0)=NVL(trim(pa.group_idn),0)
+and pol.policy_unit_num = pa.policy_unit_num
+and NVL(trim(pol.policy_year_dte),0) = NVL(trim(pa.policy_year_dte),0)
+and NVL(trim(pol.policy_suffix_cde),0) = NVL(trim(pa.policy_suffix_cde),0)
+and pa.termination_dte='0001-01-01 00:00:00'
+left outer join edl_edw_policy_stg.agent aa on 
+NVL(trim(pa.agent_idn),0) = NVL(trim(aa.agent_idn),0)
+ """)
+  }
+}
